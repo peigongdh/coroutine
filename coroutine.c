@@ -1,3 +1,4 @@
+#include "contextu.h"
 #include "coroutine.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -27,7 +28,7 @@ struct coroutine;
 struct schedule {
     char stack[STACK_SIZE];    // 运行时栈
 
-    ucontext_t main; // 主协程的上下文
+    ctx_context_t main; // 主协程的上下文
     int nco; // 当前存活的协程个数
     int cap; // 协程管理器的当前最大容量，即可以同时支持多少个协程。如果不够了，则进行扩容
     int running; // 正在运行的协程ID
@@ -40,7 +41,7 @@ struct schedule {
 struct coroutine {
     coroutine_func func; // 协程所用的函数
     void *ud;  // 协程参数
-    ucontext_t ctx; // 协程上下文
+    ctx_context_t ctx; // 协程上下文
     struct schedule *sch; // 该协程所属的调度器
     ptrdiff_t cap;     // 已经分配的内存大小
     ptrdiff_t size; // 当前协程运行时栈，保存起来后的大小
@@ -155,18 +156,12 @@ coroutine_new(struct schedule *S, coroutine_func func, void *ud) {
     return -1;
 }
 
-/*
- * 通过low32和hi32 拼出了struct schedule的指针，这里为什么要用这种方式，而不是直接传struct schedule*呢？
- * 因为makecontext的函数指针的参数是int可变列表，在64位下，一个int没法承载一个指针
-*/
-static void
-mainfunc(uint32_t low32, uint32_t hi32) {
-    uintptr_t ptr = (uintptr_t) low32 | ((uintptr_t) hi32 << 32);
+static int
+mainfunc(void *ptr) {
     struct schedule *S = (struct schedule *) ptr;
-
     int id = S->running;
     struct coroutine *C = S->co[id];
-    C->func(S, C->ud);    // 中间有可能会有不断的yield
+    C->func(S, C->ud);
     _co_delete(C);
     S->co[id] = NULL;
     --S->nco;
@@ -193,22 +188,21 @@ coroutine_resume(struct schedule *S, int id) {
     switch (status) {
         case COROUTINE_READY:
             // 初始化ucontext_t结构体,将当前的上下文放到C->ctx里面
-            getcontext(&C->ctx);
+            ctx_getcontext(&C->ctx);
             // 将当前协程的运行时栈的栈顶设置为S->stack
             // 每个协程都这么设置，这就是所谓的共享栈。（注意，这里是栈顶）
-            C->ctx.uc_stack.ss_sp = S->stack;
-            C->ctx.uc_stack.ss_size = STACK_SIZE;
+            C->ctx.stack = S->stack;
+            C->ctx.stack_size = STACK_SIZE;
             // 如果协程执行完，将切换到主协程中执行
-            C->ctx.uc_link = &S->main;
+            C->ctx.link = &S->main;
             S->running = id;
             C->status = COROUTINE_RUNNING;
 
             // 设置执行C->ctx函数, 并将S作为参数传进去
-            uintptr_t ptr = (uintptr_t) S;
-            makecontext(&C->ctx, (void (*)(void)) mainfunc, 2, (uint32_t) ptr, (uint32_t) (ptr >> 32));
+            ctx_makecontext(&C->ctx, (int (*)(void *)) mainfunc, (void *) S);
 
             // 将当前的上下文放入S->main中，并将C->ctx的上下文替换到当前上下文
-            swapcontext(&S->main, &C->ctx);
+            ctx_swapcontext(&S->main, &C->ctx);
             break;
         case COROUTINE_SUSPEND:
             // 将协程所保存的栈的内容，拷贝到当前运行时栈中
@@ -216,7 +210,7 @@ coroutine_resume(struct schedule *S, int id) {
             memcpy(S->stack + STACK_SIZE - C->size, C->stack, C->size);
             S->running = id;
             C->status = COROUTINE_RUNNING;
-            swapcontext(&S->main, &C->ctx);
+            ctx_swapcontext(&S->main, &C->ctx);
             break;
         default:
             assert(0);
@@ -267,7 +261,7 @@ coroutine_yield(struct schedule *S) {
     S->running = -1;
 
     // 所以这里可以看到，只能从协程切换到主协程中
-    swapcontext(&C->ctx, &S->main);
+    ctx_swapcontext(&C->ctx, &S->main);
 }
 
 int
