@@ -1,10 +1,8 @@
 .idea
 /cmake-build-debug/
-/coroutine
 /cmake_install.cmake
 /CMakeCache.txt
 /coroutinedh.cbp
-/test_ctx
-/test_swap
 /CMakeFiles/
 /Makefile
+*.bin
